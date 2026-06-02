@@ -1,0 +1,32 @@
+{
+  "name": "lunchloop",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"yarn workspace @lunchloop/api dev\" \"yarn workspace @lunchloop/mobile start\"",
+    "dev:api": "yarn workspace @lunchloop/api dev",
+    "dev:mobile": "yarn workspace @lunchloop/mobile start",
+    "dev:matching": "docker compose up matching -d",
+    "build": "yarn workspaces foreach -A run build",
+    "lint": "yarn workspaces foreach -A run lint",
+    "test": "yarn workspaces foreach -A run test",
+    "db:migrate": "yarn workspace @lunchloop/api db:migrate",
+    "db:seed": "yarn workspace @lunchloop/api db:seed",
+    "db:studio": "yarn workspace @lunchloop/api db:studio",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "docker:reset": "docker compose down -v && docker compose up -d"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "yarn": ">=4.0.0"
+  }
+}

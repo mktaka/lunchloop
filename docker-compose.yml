@@ -1,0 +1,115 @@
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────────
+  # PostgreSQL (AWS RDS の代替・ローカル開発用)
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: lunchloop-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lunchloop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lunchloop_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-lunchloop}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lunchloop}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # Next.js API Server (CO002)
+  # ─────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile.dev
+    container_name: lunchloop-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-lunchloop}:${POSTGRES_PASSWORD:-lunchloop_dev}@postgres:5432/${POSTGRES_DB:-lunchloop}
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      MATCHING_SERVICE_URL: http://matching:8000
+      AWS_REGION: ${AWS_REGION:-ap-northeast-1}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+      NODE_ENV: development
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/api:/app/apps/api
+      - ./packages:/app/packages
+      - ./prisma:/app/prisma
+      - /app/apps/api/node_modules
+      - /app/apps/api/.next
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: yarn workspace @lunchloop/api dev
+
+  # ─────────────────────────────────────────────
+  # FastAPI Matching Service (CO003)
+  # ─────────────────────────────────────────────
+  matching:
+    build:
+      context: ./services/matching
+      dockerfile: Dockerfile.dev
+    container_name: lunchloop-matching
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-lunchloop}:${POSTGRES_PASSWORD:-lunchloop_dev}@postgres:5432/${POSTGRES_DB:-lunchloop}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+      SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/matching:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ─────────────────────────────────────────────
+  # Nginx Reverse Proxy (本番構成の再現)
+  # ─────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: lunchloop-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./infra/nginx/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+      - matching
+    profiles:
+      - full  # docker compose --profile full up で起動
+
+  # ─────────────────────────────────────────────
+  # Adminer (DB管理UI)
+  # ─────────────────────────────────────────────
+  adminer:
+    image: adminer:latest
+    container_name: lunchloop-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    profiles:
+      - tools
+
+volumes:
+  postgres_data:
+    name: lunchloop-postgres-data

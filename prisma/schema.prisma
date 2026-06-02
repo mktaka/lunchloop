@@ -1,0 +1,308 @@
+// =============================================
+// Lunchloop Prisma Schema
+// 設計書 v0.1 のDB定義を完全再現
+// =============================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// ENUM 定義
+// ─────────────────────────────────────────────
+
+enum UserType {
+  student     // 大学生
+  vocational  // 専門学生
+  worker      // 社会人
+}
+
+enum GenderPref {
+  same_gender_only   // 同性のみ
+  opposite_gender_ok // 異性も可
+  mixed_ok           // 男女混合も可
+  group_only_mixed   // 3人以上なら男女混合可
+}
+
+enum LunchMode {
+  scheduled // 事前予約モード
+  now       // 今すぐモード（GPS即時マッチ）
+}
+
+enum RequestStatus {
+  waiting   // マッチング待機中
+  matched   // マッチング成立
+  cancelled // キャンセル済み
+  expired   // 期限切れ
+}
+
+enum MatchStatus {
+  pending   // 承認待ち
+  confirmed // 承認済み
+  ongoing   // 進行中（待ち合わせ中）
+  completed // 完了
+  cancelled // キャンセル
+}
+
+enum PartySize {
+  one_on_one // 1on1
+  two_to_three
+  three_to_four
+  any
+}
+
+enum DocType {
+  student_id  // 学生証
+  license     // 運転免許証
+  mynumber    // マイナンバーカード
+  passport    // パスポート
+  residence   // 住民票
+}
+
+enum VerificationStatus {
+  pending  // 審査中
+  approved // 承認済み
+  rejected // 否認
+}
+
+// ─────────────────────────────────────────────
+// users（ユーザー基本情報）
+// ─────────────────────────────────────────────
+model User {
+  id                 String    @id @default(uuid()) @db.Uuid
+  email              String    @unique
+  phone              String?
+  display_name       String
+  age                Int
+  gender             String    // male / female / other
+  user_type          UserType
+  school_or_company  String
+  major_or_industry  String
+  avatar_url         String?
+  trust_score        Decimal   @default(3.0) @db.Decimal(3, 1) // MVP初期値=3.0
+  is_verified        Boolean   @default(false)
+  is_premium         Boolean   @default(false)
+  is_active          Boolean   @default(true)
+  created_at         DateTime  @default(now())
+  updated_at         DateTime  @updatedAt
+
+  // Relations
+  profile            UserProfile?
+  verifications      UserVerification[]
+  lunch_requests     LunchRequest[]
+  match_attendances  MatchAttendance[]
+  sent_messages      Message[]
+  reviews_given      Review[]           @relation("ReviewerRelation")
+  reviews_received   Review[]           @relation("RevieweeRelation")
+  thanks_sent        ThankMessage[]     @relation("ThankSenderRelation")
+  thanks_received    ThankMessage[]     @relation("ThankReceiverRelation")
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// user_profiles（興味・趣味・性別設定）
+// ─────────────────────────────────────────────
+model UserProfile {
+  id                  String     @id @default(uuid()) @db.Uuid
+  user_id             String     @unique @db.Uuid
+  hobbies             String[]   // 趣味
+  interests           String[]   // 興味分野
+  talk_themes         String[]   // 話したいテーマ
+  target_industries   String[]   // 興味ある業界
+  favorite_foods      String[]   // 好きな食べ物
+  mbti                String?    // MBTIタイプ（任意）
+  bio                 String?    // 一言コメント
+  gender_pref         GenderPref @default(same_gender_only)
+  updated_at          DateTime   @updatedAt
+
+  user  User  @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+// ─────────────────────────────────────────────
+// user_verifications（本人確認書類）
+// ─────────────────────────────────────────────
+model UserVerification {
+  id            String             @id @default(uuid()) @db.Uuid
+  user_id       String             @db.Uuid
+  doc_type      DocType
+  doc_image_url String             // AWS S3 パス
+  status        VerificationStatus @default(pending)
+  reviewed_at   DateTime?
+  created_at    DateTime           @default(now())
+
+  user  User  @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("user_verifications")
+}
+
+// ─────────────────────────────────────────────
+// lunch_requests（ランチ募集条件）
+// ─────────────────────────────────────────────
+model LunchRequest {
+  id          String        @id @default(uuid()) @db.Uuid
+  user_id     String        @db.Uuid
+  mode        LunchMode
+  date        DateTime      @db.Date
+  time_start  DateTime      @db.Time()
+  time_end    DateTime      @db.Time()
+  budget_min  Int           @default(500)
+  budget_max  Int           @default(1500)
+  food_genre  String[]      // ["ラーメン", "カフェ", ...]
+  party_size  PartySize     @default(one_on_one)
+  gender_pref GenderPref
+  latitude    Decimal       @db.Decimal(10, 7)
+  longitude   Decimal       @db.Decimal(10, 7)
+  radius_m    Int           @default(1000) // nowモードは400m固定
+  status      RequestStatus @default(waiting)
+  created_at  DateTime      @default(now())
+
+  user  User  @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([status, date])
+  @@index([latitude, longitude])
+  @@map("lunch_requests")
+}
+
+// ─────────────────────────────────────────────
+// matches（マッチング結果）
+// ─────────────────────────────────────────────
+model Match {
+  id                   String      @id @default(uuid()) @db.Uuid
+  lunch_request_ids    String[]    @db.Uuid
+  matched_user_ids     String[]    @db.Uuid
+  restaurant_id        String?     @db.Uuid
+  meetup_time          DateTime?
+  meetup_location      String?
+  status               MatchStatus @default(pending)
+  chat_room_id         String?     @unique @db.Uuid
+  merged_at            DateTime?
+  created_at           DateTime    @default(now())
+
+  restaurant   Restaurant?   @relation(fields: [restaurant_id], references: [id])
+  chat_room    ChatRoom?     @relation(fields: [chat_room_id], references: [id])
+  attendances  MatchAttendance[]
+  reviews      Review[]
+  thanks       ThankMessage[]
+
+  @@map("matches")
+}
+
+// ─────────────────────────────────────────────
+// match_attendance（合流確認・ドタキャン管理）★重要
+// ─────────────────────────────────────────────
+model MatchAttendance {
+  id                       String   @id @default(uuid()) @db.Uuid
+  match_id                 String   @db.Uuid
+  user_id                  String   @db.Uuid
+  checked_in               Boolean  @default(false)
+  checked_in_at            DateTime?
+  gps_verified             Boolean  @default(false)
+  gps_lat                  Decimal? @db.Decimal(10, 7)
+  gps_lng                  Decimal? @db.Decimal(10, 7)
+  no_show                  Boolean  @default(false)
+  no_show_penalty_applied  Boolean  @default(false)
+
+  match  Match  @relation(fields: [match_id], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([match_id, user_id])
+  @@map("match_attendance")
+}
+
+// ─────────────────────────────────────────────
+// restaurants（店舗）
+// ─────────────────────────────────────────────
+model Restaurant {
+  id              String   @id @default(uuid()) @db.Uuid
+  name            String
+  genre           String[]
+  budget_avg      Int
+  latitude        Decimal  @db.Decimal(10, 7)
+  longitude       Decimal  @db.Decimal(10, 7)
+  address         String
+  open_hours      Json     // { "mon": "11:00-22:00", ... }
+  google_place_id String   @unique
+  created_at      DateTime @default(now())
+
+  matches  Match[]
+
+  @@map("restaurants")
+}
+
+// ─────────────────────────────────────────────
+// chat_rooms / messages（チャット）
+// ─────────────────────────────────────────────
+model ChatRoom {
+  id         String   @id @default(uuid()) @db.Uuid
+  is_closed  Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  match     Match?
+  messages  Message[]
+
+  @@map("chat_rooms")
+}
+
+model Message {
+  id         String   @id @default(uuid()) @db.Uuid
+  room_id    String   @db.Uuid
+  sender_id  String   @db.Uuid
+  body       String
+  is_deleted Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  room    ChatRoom  @relation(fields: [room_id], references: [id], onDelete: Cascade)
+  sender  User      @relation(fields: [sender_id], references: [id])
+
+  @@index([room_id, created_at])
+  @@map("messages")
+}
+
+// ─────────────────────────────────────────────
+// reviews（フェーズ2）
+// ─────────────────────────────────────────────
+model Review {
+  id               String   @id @default(uuid()) @db.Uuid
+  match_id         String   @db.Uuid
+  reviewer_id      String   @db.Uuid
+  reviewee_id      String   @db.Uuid
+  was_punctual     Boolean  // 時間を守ったか（1.0点）
+  joined_convo     Boolean  // 会話に参加していたか（1.0点）
+  no_bad_behavior  Boolean  // 不快な行動はなかったか（2.0点）
+  want_rematch     Boolean  // またLunchloopで会いたいか（1.0点）
+  score            Decimal  @db.Decimal(3, 1) // 合計 0.0〜5.0
+  created_at       DateTime @default(now())
+
+  match     Match  @relation(fields: [match_id], references: [id])
+  reviewer  User   @relation("ReviewerRelation", fields: [reviewer_id], references: [id])
+  reviewee  User   @relation("RevieweeRelation", fields: [reviewee_id], references: [id])
+
+  @@unique([match_id, reviewer_id, reviewee_id])
+  @@map("reviews")
+}
+
+// ─────────────────────────────────────────────
+// thank_messages（フェーズ2）
+// ─────────────────────────────────────────────
+model ThankMessage {
+  id          String   @id @default(uuid()) @db.Uuid
+  match_id    String   @db.Uuid
+  sender_id   String   @db.Uuid
+  receiver_id String   @db.Uuid
+  body        String
+  created_at  DateTime @default(now())
+
+  match     Match  @relation(fields: [match_id], references: [id])
+  sender    User   @relation("ThankSenderRelation", fields: [sender_id], references: [id])
+  receiver  User   @relation("ThankReceiverRelation", fields: [receiver_id], references: [id])
+
+  @@map("thank_messages")
+}

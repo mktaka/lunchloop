@@ -1,0 +1,160 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Lint & Type Check
+  # ─────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "yarn"
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint Next.js API
+        run: yarn workspace @lunchloop/api lint
+
+      - name: Type check
+        run: yarn workspace @lunchloop/api tsc --noEmit
+
+      - name: Lint Python (matching service)
+        uses: astral-sh/ruff-action@v1
+        with:
+          src: "./services/matching"
+
+  # ─────────────────────────────────────────────
+  # Test: Next.js API
+  # ─────────────────────────────────────────────
+  test-api:
+    name: Test API
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lunchloop
+          POSTGRES_PASSWORD: lunchloop_test
+          POSTGRES_DB: lunchloop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://lunchloop:lunchloop_test@localhost:5432/lunchloop_test
+      NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+      SUPABASE_SERVICE_ROLE_KEY: placeholder
+      MATCHING_SERVICE_URL: http://localhost:8000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "yarn"
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Prisma migrate (test DB)
+        run: yarn workspace @lunchloop/api prisma migrate deploy
+
+      - name: Run tests
+        run: yarn workspace @lunchloop/api test
+
+  # ─────────────────────────────────────────────
+  # Test: FastAPI Matching Service
+  # ─────────────────────────────────────────────
+  test-matching:
+    name: Test Matching Service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r services/matching/requirements.txt
+
+      - name: Run tests
+        run: |
+          cd services/matching
+          pytest tests/ -v --tb=short
+
+  # ─────────────────────────────────────────────
+  # Deploy to EC2 (main ブランチのみ)
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    needs: [lint, test-api, test-matching]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-1
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /opt/lunchloop
+
+            echo "📦 Pulling latest code..."
+            git pull origin main
+
+            echo "🔧 Installing dependencies..."
+            yarn install --frozen-lockfile
+
+            echo "🗄️  Running DB migrations..."
+            yarn workspace @lunchloop/api prisma migrate deploy
+
+            echo "🚀 Restarting services..."
+            pm2 restart lunchloop-api || pm2 start yarn --name lunchloop-api -- workspace @lunchloop/api start
+            sudo systemctl restart lunchloop-matching
+
+            echo "✅ Deploy complete!"
+
+      - name: Notify deployment
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: "Deploy to EC2: ${{ job.status }}"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        continue-on-error: true
